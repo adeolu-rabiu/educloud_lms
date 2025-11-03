@@ -56,6 +56,7 @@ EduCloud Platform is a scalable, cloud-native learning management system designe
 ### High-Level System Architecture
 ```mermaid
 graph TB
+    Users[End Users]
     subgraph "Users & Clients"
         Users[End Users]
         Admin[Administrators]
@@ -64,7 +65,7 @@ graph TB
     
     subgraph "Edge & CDN Layer"
         CF[CloudFront CDN]
-        LE[Lambda@Edge]
+        LE[Lambda Edge]
         WAF[AWS WAF]
     end
     
@@ -177,10 +178,7 @@ graph TB
 ### Network Architecture
 ```mermaid
 graph TB
-    subgraph "Internet"
-        Users[End Users]
-        Internet[Public Internet]
-    end
+    Users[End Users]
     
     subgraph "AWS VPC - EU-WEST-2 - 10.0.0.0/16"
         subgraph "Availability Zone A"
@@ -222,7 +220,7 @@ graph TB
     end
     
     Users --> Internet
-    Internet --> IGW
+    Users --> IGW
     IGW --> ALB_A
     IGW --> ALB_B
     
@@ -742,6 +740,7 @@ curl http://localhost:9200/_search?q=level:ERROR
 ### Security Architecture
 ```mermaid
 graph TB
+    Users[End Users]
     subgraph "Identity & Access Management"
         subgraph "AWS IAM"
             IAM_Users[IAM Users]
