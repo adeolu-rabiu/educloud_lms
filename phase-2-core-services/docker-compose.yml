@@ -1,0 +1,296 @@
+version: '3.8'
+
+# EduCloud Platform - Phase 2: Core Services
+# Docker Compose configuration for local development
+
+services:
+  # ================================
+  # PostgreSQL Database
+  # ================================
+  postgres:
+    image: postgres:15-alpine
+    container_name: educloud-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-educloud}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-dev_password}
+      POSTGRES_DB: ${POSTGRES_DB:-educloud_dev}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init-scripts/postgres:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U educloud"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - educloud-network
+    restart: unless-stopped
+
+  # ================================
+  # MongoDB Database
+  # ================================
+  mongodb:
+    image: mongo:7.0
+    container_name: educloud-mongodb
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGODB_USER:-educloud}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGODB_PASSWORD:-dev_password}
+      MONGO_INITDB_DATABASE: ${MONGODB_DB:-educloud_events}
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb_data:/data/db
+      - mongodb_config:/data/configdb
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - educloud-network
+    restart: unless-stopped
+
+  # ================================
+  # Redis Cache
+  # ================================
+  redis:
+    image: redis:7-alpine
+    container_name: educloud-redis
+    command: redis-server --appendonly yes
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - educloud-network
+    restart: unless-stopped
+
+  # ================================
+  # Elasticsearch (Optional - Phase 4)
+  # ================================
+  elasticsearch:
+    image: elasticsearch:8.11.0
+    container_name: educloud-elasticsearch
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+    ports:
+      - "9200:9200"
+      - "9300:9300"
+    volumes:
+      - elasticsearch_data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:9200/_cluster/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    networks:
+      - educloud-network
+    restart: unless-stopped
+    profiles:
+      - phase4
+
+  # ================================
+  # Rails API Application
+  # ================================
+  rails-api:
+    build:
+      context: ./applications/rails-api
+      dockerfile: Dockerfile
+    container_name: educloud-rails-api
+    command: bash -c "rm -f tmp/pids/server.pid && bundle exec rails s -b 0.0.0.0"
+    ports:
+      - "3000:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mongodb:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-educloud}:${POSTGRES_PASSWORD:-dev_password}@postgres:5432/${POSTGRES_DB:-educloud_dev}
+      REDIS_URL: redis://redis:6379/0
+      MONGODB_URL: mongodb://${MONGODB_USER:-educloud}:${MONGODB_PASSWORD:-dev_password}@mongodb:27017/${MONGODB_DB:-educloud_events}?authSource=admin
+      RAILS_ENV: ${RAILS_ENV:-development}
+      RAILS_MAX_THREADS: 5
+      SECRET_KEY_BASE: ${SECRET_KEY_BASE:-development_secret_key_base_change_in_production}
+      ELASTICSEARCH_URL: http://elasticsearch:9200
+    volumes:
+      - ./applications/rails-api:/app
+      - rails_bundle:/usr/local/bundle
+      - rails_tmp:/app/tmp
+      - rails_log:/app/log
+    networks:
+      - educloud-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:3000/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # ================================
+  # Node.js Microservice
+  # ================================
+  node-service:
+    build:
+      context: ./applications/node-service
+      dockerfile: Dockerfile
+    container_name: educloud-node-service
+    command: npm run dev
+    ports:
+      - "8080:8080"
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      MONGODB_URL: mongodb://${MONGODB_USER:-educloud}:${MONGODB_PASSWORD:-dev_password}@mongodb:27017/${MONGODB_DB:-educloud_events}?authSource=admin
+      REDIS_URL: redis://redis:6379/1
+      NODE_ENV: ${NODE_ENV:-development}
+      PORT: 8080
+      ELASTICSEARCH_URL: http://elasticsearch:9200
+    volumes:
+      - ./applications/node-service:/app
+      - node_modules:/app/node_modules
+    networks:
+      - educloud-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # ================================
+  # Sidekiq Background Workers
+  # ================================
+  sidekiq:
+    build:
+      context: ./applications/rails-api
+      dockerfile: Dockerfile
+    container_name: educloud-sidekiq
+    command: bundle exec sidekiq -C config/sidekiq.yml
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-educloud}:${POSTGRES_PASSWORD:-dev_password}@postgres:5432/${POSTGRES_DB:-educloud_dev}
+      REDIS_URL: redis://redis:6379/0
+      MONGODB_URL: mongodb://${MONGODB_USER:-educloud}:${MONGODB_PASSWORD:-dev_password}@mongodb:27017/${MONGODB_DB:-educloud_events}?authSource=admin
+      RAILS_ENV: ${RAILS_ENV:-development}
+      SECRET_KEY_BASE: ${SECRET_KEY_BASE:-development_secret_key_base_change_in_production}
+    volumes:
+      - ./applications/rails-api:/app
+      - rails_bundle:/usr/local/bundle
+    networks:
+      - educloud-network
+    restart: unless-stopped
+
+  # ================================
+  # Kibana (Optional - Phase 4)
+  # ================================
+  kibana:
+    image: kibana:8.11.0
+    container_name: educloud-kibana
+    ports:
+      - "5601:5601"
+    depends_on:
+      - elasticsearch
+    environment:
+      ELASTICSEARCH_HOSTS: http://elasticsearch:9200
+    networks:
+      - educloud-network
+    restart: unless-stopped
+    profiles:
+      - phase4
+
+  # ================================
+  # Prometheus (Optional - Phase 7)
+  # ================================
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: educloud-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+    networks:
+      - educloud-network
+    restart: unless-stopped
+    profiles:
+      - phase7
+
+  # ================================
+  # Grafana (Optional - Phase 7)
+  # ================================
+  grafana:
+    image: grafana/grafana:latest
+    container_name: educloud-grafana
+    ports:
+      - "3001:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+      - GF_SERVER_ROOT_URL=http://localhost:3001
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards
+      - ./monitoring/grafana/datasources:/etc/grafana/provisioning/datasources
+    networks:
+      - educloud-network
+    restart: unless-stopped
+    profiles:
+      - phase7
+
+# ================================
+# Networks
+# ================================
+networks:
+  educloud-network:
+    driver: bridge
+    name: educloud-network
+
+# ================================
+# Volumes
+# ================================
+volumes:
+  postgres_data:
+    name: educloud_postgres_data
+  mongodb_data:
+    name: educloud_mongodb_data
+  mongodb_config:
+    name: educloud_mongodb_config
+  redis_data:
+    name: educloud_redis_data
+  elasticsearch_data:
+    name: educloud_elasticsearch_data
+  rails_bundle:
+    name: educloud_rails_bundle
+  rails_tmp:
+    name: educloud_rails_tmp
+  rails_log:
+    name: educloud_rails_log
+  node_modules:
+    name: educloud_node_modules
+  prometheus_data:
+    name: educloud_prometheus_data
+  grafana_data:
+    name: educloud_grafana_data
