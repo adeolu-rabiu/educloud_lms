@@ -29,6 +29,65 @@ echo ""
 echo "This script will help you set up Phase 1 infrastructure."
 echo ""
 
+# Load environment variables from .env file
+load_env_file() {
+    local env_file="$1"
+    
+    if [ ! -f "$env_file" ]; then
+        echo -e "${RED}✗ .env file not found at: $env_file${NC}"
+        echo ""
+        echo "Please create a .env file with the following variables:"
+        echo "  AWS_ACCESS_KEY_ID=your_access_key"
+        echo "  AWS_SECRET_ACCESS_KEY=your_secret_key"
+        echo "  AWS_DEFAULT_REGION=eu-west-2"
+        echo "  AWS_ACCOUNT_ID=your_account_id"
+        echo ""
+        return 1
+    fi
+    
+    echo -e "${GREEN}✓ Loading environment variables from .env${NC}"
+    
+    # Export variables from .env file
+    set -a
+    source "$env_file"
+    set +a
+    
+    return 0
+}
+
+# Validate required AWS environment variables
+validate_aws_credentials() {
+    local missing_vars=()
+    
+    if [ -z "$AWS_ACCESS_KEY_ID" ]; then
+        missing_vars+=("AWS_ACCESS_KEY_ID")
+    fi
+    
+    if [ -z "$AWS_SECRET_ACCESS_KEY" ]; then
+        missing_vars+=("AWS_SECRET_ACCESS_KEY")
+    fi
+    
+    if [ -z "$AWS_DEFAULT_REGION" ]; then
+        missing_vars+=("AWS_DEFAULT_REGION")
+    fi
+    
+    if [ ${#missing_vars[@]} -gt 0 ]; then
+        echo -e "${RED}✗ Missing required environment variables:${NC}"
+        for var in "${missing_vars[@]}"; do
+            echo "  - $var"
+        done
+        echo ""
+        echo "Please add these to your .env file"
+        return 1
+    fi
+    
+    echo -e "${GREEN}✓ AWS credentials loaded from .env${NC}"
+    echo "  Region: $AWS_DEFAULT_REGION"
+    echo "  Access Key: ${AWS_ACCESS_KEY_ID:0:10}***"
+    
+    return 0
+}
+
 # Step 1: Check prerequisites
 echo -e "${GREEN}Step 1: Checking prerequisites...${NC}"
 if command -v terraform &> /dev/null && command -v terragrunt &> /dev/null; then
@@ -51,7 +110,7 @@ if [ "$choice" = "1" ]; then
     echo "Setting up for LocalStack..."
     export AWS_ACCESS_KEY_ID=test
     export AWS_SECRET_ACCESS_KEY=test
-    export AWS_DEFAULT_REGION=us-east-1
+    export AWS_DEFAULT_REGION=eu-west-2
     export AWS_ENDPOINT_URL=http://localhost:4566
     
     # Check if LocalStack is running
@@ -67,13 +126,48 @@ if [ "$choice" = "1" ]; then
     fi
 elif [ "$choice" = "2" ]; then
     echo "Using AWS Account..."
+    echo ""
+    
+    # Load credentials from .env file
+    ENV_FILE="../../.env"
+    
+    if [ ! -f "$ENV_FILE" ]; then
+        # Try alternative locations
+        if [ -f "../.env" ]; then
+            ENV_FILE="../.env"
+        elif [ -f ".env" ]; then
+            ENV_FILE=".env"
+        fi
+    fi
+    
+    if ! load_env_file "$ENV_FILE"; then
+        exit 1
+    fi
+    
+    echo ""
+    
+    # Validate credentials
+    if ! validate_aws_credentials; then
+        exit 1
+    fi
+    
+    echo ""
+    
+    # Export credentials for Terraform/AWS CLI
+    export AWS_ACCESS_KEY_ID
+    export AWS_SECRET_ACCESS_KEY
+    export AWS_DEFAULT_REGION
+    
+    # Test AWS connection
+    echo "Testing AWS connection..."
     if aws sts get-caller-identity > /dev/null 2>&1; then
-        echo "✓ AWS credentials configured"
+        echo -e "${GREEN}✓ AWS credentials verified${NC}"
+        echo ""
         aws sts get-caller-identity
     else
-        echo "✗ AWS credentials not configured"
+        echo -e "${RED}✗ AWS credentials are invalid${NC}"
         echo ""
-        echo "Configure AWS with: aws configure"
+        echo "Please check your credentials in .env file"
         exit 1
     fi
 else
